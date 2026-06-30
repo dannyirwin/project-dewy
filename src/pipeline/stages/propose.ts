@@ -1,4 +1,3 @@
-import { z } from "zod";
 import {
   type ActionContext,
   AppendSectionPayload,
@@ -8,49 +7,21 @@ import {
   validateAction,
 } from "../../actions/index.js";
 import type { AppConfig } from "../../config/index.js";
-import { ActionTypeSchema, type IngestionJob } from "../../domain/schemas.js";
+import type { IngestionJob } from "../../domain/schemas.js";
 import type { KbConfigService } from "../../kb/index.js";
 import { logger } from "../../logging/index.js";
-import type { ChatProvider, EmbeddingProvider } from "../../providers/interfaces.js";
+import type { ChatMessage, ChatProvider, EmbeddingProvider } from "../../providers/interfaces.js";
 import type { Repositories } from "../../repositories/interfaces.js";
 import type { SearchService } from "../../retrieval/search.js";
 import type { VersioningService } from "../../versioning/index.js";
 import { renderScratchpadMarkdown } from "../scratchpad.js";
 import type { StepResult } from "../stateMachine.js";
+import { createProposalTools } from "./propose-tools.js";
 
 /**
- * Stage 3 (plan §6): the LLM proposes structured actions; deterministic code
- * validates, gates, and applies them.
- * - Augment-first philosophy is enforced two ways: the prompt instructs it,
- *   and the page-eligibility rules engine (plan §9) can deterministically
- *   demote a create_document into an append_section fallback.
- * - confidence ≥ AUTO_APPLY_CONFIDENCE_THRESHOLD and no review-gated issues →
- *   auto-approved; otherwise → review_item (kind proposed_action) and the job
- *   parks in awaiting_review.
+ * Stage 3 (plan §6): the LLM proposes structured actions via a tool-call loop;
+ * deterministic code validates, gates, and applies them.
  */
-
-const ProposalSchema = z
-  .object({
-    actions: z
-      .array(
-        z
-          .object({
-            type: ActionTypeSchema,
-            payload: z.record(z.string(), z.unknown()),
-            confidence: z.number().min(0).max(1),
-            reason: z.string(),
-            /** for create_document: where to attach instead if a page isn't warranted */
-            fallback_attach: z
-              .object({ document_id: z.uuid(), section_key: z.string().min(1) })
-              .strict()
-              .nullable()
-              .default(null),
-          })
-          .strict(),
-      )
-      .max(30),
-  })
-  .strict();
 
 export interface Stage3Deps {
   repos: Repositories;
@@ -59,7 +30,7 @@ export interface Stage3Deps {
   search: SearchService;
   versioning: VersioningService;
   kbService: KbConfigService;
-  cfg: Pick<AppConfig, "AUTO_APPLY_CONFIDENCE_THRESHOLD">;
+  cfg: Pick<AppConfig, "AUTO_APPLY_CONFIDENCE_THRESHOLD" | "PROPOSAL_STEP_BUDGET">;
 }
 
 async function buildActionContext(
@@ -83,6 +54,100 @@ async function buildActionContext(
   };
 }
 
+async function collectProposals(
+  deps: Stage3Deps,
+  job: IngestionJob,
+  kb: NonNullable<Awaited<ReturnType<Repositories["knowledgeBases"]["getById"]>>>,
+  report: NonNullable<IngestionJob["stage_outputs"]["reconciliation"]>,
+): Promise<ReturnType<ReturnType<typeof createProposalTools>["getCollected"]>> {
+  const tools = createProposalTools();
+  const log = logger.child({ ingestion_job_id: job.id, stage: "proposing_edits" });
+
+  const linkedIds = [...new Set(report.items.flatMap((i) => i.linked_document_ids))];
+  const linkedDocs = (
+    await Promise.all(linkedIds.map((id) => deps.repos.documents.getById(id)))
+  ).filter((d) => d !== null);
+  const docContext = linkedDocs
+    .map((d) => {
+      const template = kb.config.templates.find(
+        (t) => t.id === (d.template_id ?? kb.config.default_template_id),
+      );
+      return `- ${d.id} "${d.title}" (template: ${template?.id ?? "generic"}; sections: ${template?.sections.map((s) => s.key).join(", ")})`;
+    })
+    .join("\n");
+  const tags = await deps.repos.tags.listByKb(kb.id);
+  const rules = kb.config.page_eligibility_rules;
+
+  const system =
+    "You translate a reconciliation report into concrete wiki edits by calling proposal tools one at a time.\n" +
+    "PHILOSOPHY: augment first. Prefer propose_append_section / propose_update_section over propose_create_document. " +
+    `New pages must satisfy the KB's eligibility rules (≥${rules.min_statements} statements, ≥${rules.min_total_words} words about the entity). ` +
+    "For every propose_create_document, ALSO supply fallback_attach (an existing document id + section key).\n" +
+    "- confirmed statements: usually no action\n" +
+    "- new statements: append/update sections or create_document when clearly warranted\n" +
+    "- conflicts/needs_review with human context in the working notes: follow the human's guidance\n" +
+    "Call one propose_* tool per action. Invalid payloads return an error — fix and retry. " +
+    "When finished, call done().";
+
+  const messages: ChatMessage[] = [
+    {
+      role: "user",
+      content:
+        `Knowledge base: ${kb.name}\n` +
+        `Available templates: ${kb.config.templates.map((t) => `${t.id} [${t.sections.map((s) => s.key).join("/")}]`).join("; ")}\n` +
+        `Existing tags: ${tags.map((t) => t.name).join(", ") || "(none)"}\n` +
+        `Documents in scope:\n${docContext || "(none yet — empty KB)"}\n\n` +
+        `Reconciliation report:\n${JSON.stringify(report, null, 2)}\n\n` +
+        `Working notes (includes any human review context):\n${renderScratchpadMarkdown(job.scratchpad)}`,
+    },
+  ];
+
+  let stepsUsed = 0;
+  let finished = false;
+
+  while (stepsUsed < deps.cfg.PROPOSAL_STEP_BUDGET && !finished) {
+    const result = await deps.chat.complete({
+      system,
+      messages,
+      tools: tools.definitions,
+      temperature: 0,
+    });
+
+    if (result.toolCalls.length === 0) {
+      messages.push({ role: "assistant", content: result.text });
+      messages.push({
+        role: "user",
+        content: "Call propose_* tools for each edit, then call done() when finished.",
+      });
+      stepsUsed++;
+      continue;
+    }
+
+    stepsUsed++;
+    messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
+    for (const call of result.toolCalls) {
+      if (tools.isDone(call.name)) {
+        finished = true;
+        messages.push({
+          role: "tool",
+          content: tools.execute(call.name, call.arguments),
+          tool_call_id: call.id,
+        });
+        break;
+      }
+      const output = tools.execute(call.name, call.arguments);
+      log.info("proposal tool", { tool: call.name });
+      messages.push({ role: "tool", content: output, tool_call_id: call.id });
+    }
+  }
+
+  if (!finished && tools.getCollected().length === 0) {
+    log.warn("proposal step budget exhausted with no actions");
+  }
+
+  return tools.getCollected();
+}
+
 export function makeProposingStep(deps: Stage3Deps) {
   return async (job: IngestionJob): Promise<StepResult> => {
     const report = job.stage_outputs.reconciliation;
@@ -91,7 +156,6 @@ export function makeProposingStep(deps: Stage3Deps) {
     if (!kb) return { next: "failed", error: "knowledge base not found" };
     const log = logger.child({ ingestion_job_id: job.id, stage: "proposing_edits" });
 
-    // Idempotent re-run guard: if proposals already exist, just re-route.
     const existing = await deps.repos.proposedActions.listByJob(job.id);
     if (existing.length > 0) {
       const pendingReview = (await deps.repos.reviewItems.listByJob(job.id)).filter(
@@ -100,85 +164,33 @@ export function makeProposingStep(deps: Stage3Deps) {
       return { next: pendingReview.length > 0 ? "awaiting_review" : "applying_edits" };
     }
 
-    // Context for the model: documents referenced by the report.
-    const linkedIds = [...new Set(report.items.flatMap((i) => i.linked_document_ids))];
-    const linkedDocs = (
-      await Promise.all(linkedIds.map((id) => deps.repos.documents.getById(id)))
-    ).filter((d) => d !== null);
-    const docContext = linkedDocs
-      .map((d) => {
-        const template = kb.config.templates.find(
-          (t) => t.id === (d.template_id ?? kb.config.default_template_id),
-        );
-        return `- ${d.id} "${d.title}" (template: ${template?.id ?? "generic"}; sections: ${template?.sections.map((s) => s.key).join(", ")})`;
-      })
-      .join("\n");
-    const tags = await deps.repos.tags.listByKb(kb.id);
-    const rules = kb.config.page_eligibility_rules;
-
-    const result = await deps.chat.complete({
-      system:
-        "You translate a reconciliation report into concrete wiki edits, as structured actions.\n" +
-        "PHILOSOPHY: augment first. Prefer append_section/update_section on existing documents over create_document. " +
-        `New pages must satisfy the KB's eligibility rules (≥${rules.min_statements} statements, ≥${rules.min_total_words} words about the entity). ` +
-        "For every create_document, ALSO supply fallback_attach (an existing document id + section key) so the system can attach the content as a subsection if the page is not warranted.\n" +
-        "- confirmed statements: usually no action (maybe upsert_link if a relationship is implied)\n" +
-        "- new statements: append/update sections on linked documents, or create_document when clearly warranted\n" +
-        "- conflicts/needs_review with human context in the working notes: follow the human's guidance\n" +
-        `Action types and payloads:\n` +
-        `- create_document { title, template_id, sections: [{key,title,body_markdown}], tag_names, link_to: [{to_document_id, relation}] }\n` +
-        `- append_section { document_id, section: {key,title,body_markdown} }\n` +
-        `- update_section { document_id, section_key, body_markdown }\n` +
-        `- upsert_link { from_document_id, to_document_id, relation: related|mentions|parent|child, anchor }\n` +
-        `- create_tag { name, kind: category|tag, parent_name, description }\n` +
-        `- apply_tag { document_id, tag_name, confidence }\n` +
-        `- promote_subsection { source_document_id, section_key, new_title, template_id }\n` +
-        "Use only document ids listed in the context. Set confidence honestly per action. " +
-        'Respond as JSON: { "actions": [{ "type", "payload", "confidence", "reason", "fallback_attach" }] }',
-      messages: [
-        {
-          role: "user",
-          content:
-            `Knowledge base: ${kb.name}\n` +
-            `Available templates: ${kb.config.templates.map((t) => `${t.id} [${t.sections.map((s) => s.key).join("/")}]`).join("; ")}\n` +
-            `Existing tags: ${tags.map((t) => t.name).join(", ") || "(none)"}\n` +
-            `Documents in scope:\n${docContext || "(none yet — empty KB)"}\n\n` +
-            `Reconciliation report:\n${JSON.stringify(report, null, 2)}\n\n` +
-            `Working notes (includes any human review context):\n${renderScratchpadMarkdown(job.scratchpad)}`,
-        },
-      ],
-      schema: ProposalSchema,
-      temperature: 0,
-    });
-    const proposal = result.parsed!;
-
+    const proposal = await collectProposals(deps, job, kb, report);
     const ctx = await buildActionContext(deps, job, false);
     let needsReview = 0;
 
-    for (const candidate of proposal.actions) {
-      let { type, payload } = candidate as { type: typeof candidate.type; payload: unknown };
+    for (const candidate of proposal) {
+      let { type, payload } = candidate;
 
-      // Page-eligibility rules engine (plan §9): deterministic gate first; the
-      // LLM judgment inside evaluatePageEligibility is itself gated.
       if (type === "create_document") {
         const parsed = CreateDocumentPayload.safeParse(payload);
         if (parsed.success) {
           const statements = parsed.data.sections
             .flatMap((s) => s.body_markdown.split(/(?<=[.!?])\s+/))
             .filter((s) => s.trim().length > 0);
-          const decision = await deps.kbService.evaluatePageEligibility(rules, {
-            entityName: parsed.data.title,
-            entityKind: parsed.data.template_id,
-            statements,
-          });
+          const decision = await deps.kbService.evaluatePageEligibility(
+            kb.config.page_eligibility_rules,
+            {
+              entityName: parsed.data.title,
+              entityKind: parsed.data.template_id,
+              statements,
+            },
+          );
           if (!decision.earnsOwnPage && candidate.fallback_attach) {
             const target = await deps.repos.documents.getById(
               candidate.fallback_attach.document_id,
             );
             if (target) {
               const body = parsed.data.sections.map((s) => s.body_markdown.trim()).join("\n\n");
-              // Attach under the target template's canonical section header —
-              // the entity name lives in the bolded lead-in, not the heading.
               const targetTemplate = kb.config.templates.find(
                 (t) => t.id === (target.template_id ?? kb.config.default_template_id),
               );
@@ -200,7 +212,6 @@ export function makeProposingStep(deps: Stage3Deps) {
               });
             }
           } else if (!decision.earnsOwnPage) {
-            // no fallback — a human has to decide
             const row = await deps.repos.proposedActions.create({
               knowledge_base_id: kb.id,
               ingestion_job_id: job.id,
@@ -301,7 +312,6 @@ export function makeApplyingStep(deps: Stage3Deps) {
     const log = logger.child({ ingestion_job_id: job.id, stage: "applying_edits" });
 
     for (const action of approved) {
-      // Human-approved actions get review-gated policies lifted.
       const reviews = await deps.repos.reviewItems.listByJob(job.id);
       const humanApproved = reviews.some(
         (r) =>

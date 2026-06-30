@@ -22,6 +22,7 @@ const envSchema = z.object({
   EMBEDDING_DIMENSION: z.coerce.number().int().positive().default(768),
 
   RECONCILIATION_STEP_BUDGET: z.coerce.number().int().positive().default(12),
+  PROPOSAL_STEP_BUDGET: z.coerce.number().int().positive().default(20),
   STRUCTURED_OUTPUT_MAX_RETRIES: z.coerce.number().int().min(0).default(3),
   AUTO_APPLY_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.85),
 

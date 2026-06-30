@@ -127,18 +127,17 @@ export function proposalTurn(
     fallback_attach?: { document_id: string; section_key: string } | null;
   }>,
 ): ScriptedTurn {
-  return {
-    kind: "parsed",
-    value: {
-      actions: actions.map((a) => ({
-        type: a.type,
-        payload: a.payload,
-        confidence: a.confidence ?? 0.95,
-        reason: a.reason ?? "test action",
-        fallback_attach: a.fallback_attach ?? null,
-      })),
+  const calls: Array<{ name: string; arguments: Record<string, unknown> }> = actions.map((a) => ({
+    name: `propose_${a.type}`,
+    arguments: {
+      ...a.payload,
+      confidence: a.confidence ?? 0.95,
+      reason: a.reason ?? "test action",
+      fallback_attach: a.fallback_attach ?? null,
     },
-  };
+  }));
+  calls.push({ name: "done", arguments: {} });
+  return { kind: "tool_calls", calls };
 }
 
 export function eligibilityTurn(earns: boolean, confidence = 0.9): ScriptedTurn {
