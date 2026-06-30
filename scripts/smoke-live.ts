@@ -8,6 +8,7 @@
  *
  * Run: pnpm smoke:live
  */
+import "../src/load-env.js";
 import { loadConfig } from "../src/config/index.js";
 import { getSupabaseClient } from "../src/db/client.js";
 import { defaultKbConfig } from "../src/kb/index.js";

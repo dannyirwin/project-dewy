@@ -6,20 +6,30 @@
 #
 # Then: docker compose up --build
 # The container reaches both through host.docker.internal.
+#
+# Optional: copy .env.example → .env and set SUPABASE_SERVICE_ROLE_KEY; compose loads it via env_file.
 services:
   kms-api:
     build: .
     ports:
       - "3000:3000"
+    env_file:
+      - path: .env
+        required: false
     environment:
       PORT: "3000"
       SUPABASE_URL: "http://host.docker.internal:54321"
-      # service_role key printed by `supabase start` / `supabase status`
+      # service_role key: export or set in .env (printed by `supabase status`)
       SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:?run `supabase status` and export the service_role key}"
-      LMSTUDIO_BASE_URL: "http://host.docker.internal:1234/v1"
-      LMSTUDIO_CHAT_MODEL: "${LMSTUDIO_CHAT_MODEL:-qwen2.5-14b-instruct}"
-      LMSTUDIO_EMBEDDING_MODEL: "${LMSTUDIO_EMBEDDING_MODEL:-text-embedding-nomic-embed-text-v1.5}"
+      CHAT_BASE_URL: "http://host.docker.internal:1234/v1"
+      CHAT_API_KEY: "${CHAT_API_KEY:-lm-studio}"
+      CHAT_MODEL: "${CHAT_MODEL:-qwen2.5-14b-instruct}"
+      EMBEDDING_BASE_URL: "http://host.docker.internal:1234/v1"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-lm-studio}"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-text-embedding-nomic-embed-text-v1.5}"
       EMBEDDING_DIMENSION: "${EMBEDDING_DIMENSION:-768}"
+      MCP_TOKEN: "${MCP_TOKEN:-}"
+      API_TOKEN: "${API_TOKEN:-}"
     extra_hosts:
       # Linux hosts need this mapping; Docker Desktop (mac/win) provides it natively.
       - "host.docker.internal:host-gateway"

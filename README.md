@@ -98,10 +98,11 @@ The migration intentionally leaves `chunk.embedding` as dimension-less `vector`;
 > This repo was authored in an environment without a Docker daemon, so `supabase db push` and the live Supabase repositories were written to spec but not executed against a running stack here. The unit/integration suite covers the same repository contracts via the in-memory implementation; run the commands above for live verification.
 
 ### 3. Configuration
-Copy `.env.example` → `.env` and fill in:
-- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — printed by `supabase status`
-- `LMSTUDIO_BASE_URL` (default `http://127.0.0.1:1234/v1`), `LMSTUDIO_CHAT_MODEL`, `LMSTUDIO_EMBEDDING_MODEL`
-- `EMBEDDING_DIMENSION` — must match the embedding model (e.g. 768 for nomic-embed-text v1.5); the provider fails loudly on mismatch
+Copy `.env.example` → `.env` and fill in (loaded automatically on `pnpm dev` / `pnpm start`):
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — from `supabase status`, or a hosted project URL + service role key
+- `CHAT_BASE_URL`, `CHAT_API_KEY`, `CHAT_MODEL` — LM Studio local server (default `http://127.0.0.1:1234/v1`)
+- `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION` — must match loaded embedding model (768 for nomic v1.5)
+- `MCP_TOKEN`, `API_TOKEN` — optional; set before shared-network or Cursor MCP access
 
 ### 4. Run
 ```bash
@@ -142,7 +143,7 @@ Mutating HTTP routes accept `API_TOKEN` when set; GET routes stay public.
 - Mock model turns are strict FIFO; tests assert on the transcript (e.g. that `checkName` results actually reached the model before it resolved a misspelling).
 
 ## Operating notes
-- **Changing embedding models**: update `LMSTUDIO_EMBEDDING_MODEL` + `EMBEDDING_DIMENSION`, re-run `pnpm db:vector-index` + apply, then regenerate chunks (re-save current versions through `VersioningService` or write a backfill that calls `SearchService.regenerateChunks`). Chunks self-describe their model/dimension, so stale rows are detectable.
+- **Changing embedding models**: update `EMBEDDING_MODEL` + `EMBEDDING_DIMENSION`, re-run `pnpm db:vector-index` + apply, then regenerate chunks (re-save current versions through `VersioningService` or write a backfill that calls `SearchService.regenerateChunks`). Chunks self-describe their model/dimension, so stale rows are detectable.
 - **Step budget / thresholds**: `RECONCILIATION_STEP_BUDGET`, `PROPOSAL_STEP_BUDGET`, `AUTO_APPLY_CONFIDENCE_THRESHOLD`, chunk sizing, and search leg weights are env-tunable (see `.env.example`).
 - **Swapping in the Agents SDK**: implement `ReconciliationEngine` (`src/pipeline/reconciliation/engine.ts`) using the SDK, reuse `createReconciliationTools` definitions as function tools, inject via `buildPipeline`.
 - **Queue**: `JobRunner` is deliberately queue-shaped (claim → advance one step). Replacing it with pg-boss/Graphile Worker touches `src/jobs/runner.ts` only.

@@ -35,7 +35,7 @@ Start the LM Studio local server (default `http://127.0.0.1:1234/v1`).
 
 ```bash
 cp .env.example .env
-# fill SUPABASE_* and optionally MCP_TOKEN / API_TOKEN
+# edit .env — values load automatically when you start the API
 pnpm install
 pnpm dev
 ```

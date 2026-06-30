@@ -1,3 +1,4 @@
+import "../load-env.js";
 import { serve } from "@hono/node-server";
 import { config } from "../config/index.js";
 import { getSupabaseClient } from "../db/client.js";
