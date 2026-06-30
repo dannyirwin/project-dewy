@@ -7,6 +7,9 @@ describe("config (Phase 0)", () => {
     expect(cfg.PORT).toBe(3000);
     expect(cfg.EMBEDDING_DIMENSION).toBe(768);
     expect(cfg.RECONCILIATION_STEP_BUDGET).toBe(12);
+    expect(cfg.PROPOSAL_STEP_BUDGET).toBe(20);
+    expect(cfg.MCP_TOKEN).toBe("");
+    expect(cfg.API_TOKEN).toBe("");
     expect(cfg.AUTO_APPLY_CONFIDENCE_THRESHOLD).toBeCloseTo(0.85);
   });
 
