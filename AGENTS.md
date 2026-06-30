@@ -81,4 +81,4 @@ An LLM-powered, wiki-style knowledge management system. Raw notes go through a p
 - Restore external skills after clone: `npx skills experimental_install` (reads `skills-lock.json`).
 - **LLM provider:** LM Studio via `src/providers/lmstudio.ts` (openai-compatible local server). Tests use mocks — no API keys for the gate.
 - **MCP:** read-only external access at `POST /mcp` (`src/mcp/server.ts`). Writes go through HTTP (`/ingestions`, `/review-items/*`) with human review.
-- MCP is intentionally unauthenticated for now; add bearer auth before public deploy.
+- **Auth:** `MCP_TOKEN` gates MCP; `API_TOKEN` gates mutating HTTP routes. Empty = disabled (offline tests). See `docs/CURSOR-MCP.md`.

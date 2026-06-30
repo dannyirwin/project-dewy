@@ -3,12 +3,28 @@ import { createApp } from "../src/api/app.js";
 import { JobRunner } from "../src/jobs/runner.js";
 import { buildTestStack, classifyTurn, proposalTurn, reconcileFinalTurn } from "./helpers.js";
 
-function buildApi() {
+function buildApi(auth?: { mcpToken?: string; apiToken?: string }) {
   const stack = buildTestStack();
   const runner = new JobRunner(stack.repos, stack.pipeline, 60_000);
-  const app = createApp({ repos: stack.repos, pipeline: stack.pipeline, runner });
+  const app = createApp({ repos: stack.repos, pipeline: stack.pipeline, runner, auth });
   return { stack, app };
 }
+
+const mcpInitBody = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "initialize",
+  params: {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "kms-test", version: "0.1.0" },
+  },
+});
+
+const mcpHeaders = {
+  "content-type": "application/json",
+  accept: "application/json, text/event-stream",
+};
 
 describe("HTTP API (plan §11)", () => {
   it("healthz + generated OpenAPI document", async () => {
@@ -150,20 +166,8 @@ describe("HTTP API (plan §11)", () => {
     const { app } = buildApi();
     const init = await app.request("/mcp", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: { name: "kms-test", version: "0.1.0" },
-        },
-      }),
+      headers: mcpHeaders,
+      body: mcpInitBody,
     });
     expect(init.status).toBe(200);
     const initBody = (await init.json()) as { result?: { serverInfo?: { name: string } } };
@@ -171,10 +175,7 @@ describe("HTTP API (plan §11)", () => {
 
     const tools = await app.request("/mcp", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-      },
+      headers: mcpHeaders,
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 2,
@@ -193,6 +194,46 @@ describe("HTTP API (plan §11)", () => {
       "list_tags",
       "search_kb",
     ]);
+  });
+
+  it("requires MCP_TOKEN when configured", async () => {
+    const { app } = buildApi({ mcpToken: "test-mcp-secret" });
+    const denied = await app.request("/mcp", {
+      method: "POST",
+      headers: mcpHeaders,
+      body: mcpInitBody,
+    });
+    expect(denied.status).toBe(401);
+
+    const ok = await app.request("/mcp", {
+      method: "POST",
+      headers: { ...mcpHeaders, authorization: "Bearer test-mcp-secret" },
+      body: mcpInitBody,
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it("requires API_TOKEN on write routes when configured", async () => {
+    const { app } = buildApi({ apiToken: "test-api-secret" });
+    const denied = await app.request("/knowledge-bases", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "X", slug: "x" }),
+    });
+    expect(denied.status).toBe(401);
+
+    const ok = await app.request("/knowledge-bases", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-api-secret",
+      },
+      body: JSON.stringify({ name: "X", slug: "x-auth" }),
+    });
+    expect(ok.status).toBe(201);
+
+    const list = await app.request("/knowledge-bases");
+    expect(list.status).toBe(200);
   });
 
   it("review endpoints drive the park/resume loop over HTTP", async () => {

@@ -12,6 +12,7 @@ import type { JobRunner } from "../jobs/runner.js";
 import { handleMcpRequest } from "../mcp/server.js";
 import type { Pipeline } from "../pipeline/index.js";
 import type { Repositories } from "../repositories/interfaces.js";
+import { apiWriteAuthMiddleware, bearerAuthWhenConfigured } from "./auth.js";
 
 /**
  * HTTP layer (plan §11): Hono + @hono/zod-openapi. Every route is described by
@@ -24,6 +25,8 @@ export interface ApiDeps {
   repos: Repositories;
   pipeline: Pipeline;
   runner: JobRunner;
+  /** When tokens are set, MCP and write routes require bearer auth. Omit for offline tests. */
+  auth?: { mcpToken?: string; apiToken?: string };
 }
 
 const ErrorSchema = z.object({ error: z.string() }).openapi("Error");
@@ -35,7 +38,7 @@ const json = <T extends z.ZodType>(schema: T, description: string) => ({
 });
 
 export function createApp(deps: ApiDeps) {
-  const { repos, pipeline, runner } = deps;
+  const { repos, pipeline, runner, auth } = deps;
   const app = new OpenAPIHono({
     defaultHook: (result, c) => {
       if (!result.success) {
@@ -43,6 +46,8 @@ export function createApp(deps: ApiDeps) {
       }
     },
   });
+
+  app.use("*", apiWriteAuthMiddleware(auth?.apiToken));
 
   // ---------- health ----------
   app.openapi(
@@ -421,7 +426,9 @@ export function createApp(deps: ApiDeps) {
   );
 
   // ---------- MCP (read-only external access) ----------
-  app.post("/mcp", async (c) => handleMcpRequest({ repos, search: pipeline.search }, c.req.raw));
+  app.post("/mcp", bearerAuthWhenConfigured(auth?.mcpToken), async (c) =>
+    handleMcpRequest({ repos, search: pipeline.search }, c.req.raw),
+  );
 
   // ---------- runner control (dev convenience) ----------
   app.openapi(
