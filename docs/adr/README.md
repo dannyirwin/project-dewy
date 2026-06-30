@@ -17,3 +17,4 @@ Format: lightweight [MADR](https://adr.github.io/)-style — Status / Context / 
 | [0009](0009-content-hash-dedup.md) | Content-hash dedup on import; near matches flagged | Accepted |
 | [0010](0010-stack-choices.md) | Stack: TypeScript strict ESM, pnpm, Hono+zod-openapi, Vitest, Supabase, Zod v4 | Accepted |
 | [0011](0011-docker-for-local-dev.md) | Docker runs the API only; Supabase CLI owns the DB stack | Accepted |
+| [0012](0012-proposal-tool-call-loop.md) | Stage 3 proposal via tool-call loop (not batch JSON) | Accepted |

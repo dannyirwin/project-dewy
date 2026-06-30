@@ -112,14 +112,26 @@ docker compose up --build
 ```
 `Dockerfile` is a multi-stage Node 22 build running the API via tsx; on Linux the compose file maps `host.docker.internal` to the host gateway (Docker Desktop provides it natively). Written to spec in a daemon-less environment — expect to smoke-test the first build.
 
+## MCP (read-only external access)
+
+`POST /mcp` exposes a [Model Context Protocol](https://modelcontextprotocol.io/) Streamable HTTP endpoint for external AI clients (Cursor IDE, Claude Code, etc.).
+
+**Read tools:** `search_kb`, `get_document`, `list_documents`, `list_tags`, `get_document_versions`, `list_review_items`.
+
+**Writes are intentionally not on MCP.** Ingest content via `POST /knowledge-bases/:id/ingestions`; resolve review via `POST /review-items/:id/{context|skip|approve|reject}`.
+
+LM Studio remains the pipeline LLM provider (`src/providers/lmstudio.ts`). MCP is a query surface only.
+
+> MCP is unauthenticated in this release. Add bearer auth before exposing publicly.
+
 ## Testing & evals
-- `pnpm test` — 52 tests: unit (config, chunker, RRF, hashing, templates), contract (repositories, structured-output retry/bounded-failure), pipeline integration (dedup short-circuit, planted-conflict reconciliation with scripted tool transcripts, park/resume review flows, page-eligibility flip), API smoke over `app.request`, and architecture guards (client-import isolation enforced by reading the source tree).
+- `pnpm test` — 53 tests: unit (config, chunker, RRF, hashing, templates), contract (repositories, structured-output retry/bounded-failure), pipeline integration (dedup short-circuit, planted-conflict reconciliation with scripted tool transcripts, park/resume review flows, page-eligibility flip, proposal tool-call loop), API smoke over `app.request` (including MCP initialize), and architecture guards (client-import isolation enforced by reading the source tree).
 - `pnpm eval` — golden end-to-end scenarios with deterministic pass/fail and nonzero exit for CI gating. Same harness can be pointed at live providers later for model-regression checks.
 - Mock model turns are strict FIFO; tests assert on the transcript (e.g. that `checkName` results actually reached the model before it resolved a misspelling).
 
 ## Operating notes
 - **Changing embedding models**: update `LMSTUDIO_EMBEDDING_MODEL` + `EMBEDDING_DIMENSION`, re-run `pnpm db:vector-index` + apply, then regenerate chunks (re-save current versions through `VersioningService` or write a backfill that calls `SearchService.regenerateChunks`). Chunks self-describe their model/dimension, so stale rows are detectable.
-- **Step budget / thresholds**: `RECONCILIATION_STEP_BUDGET`, `AUTO_APPLY_CONFIDENCE_THRESHOLD`, chunk sizing, and search leg weights are env-tunable (see `.env.example`).
+- **Step budget / thresholds**: `RECONCILIATION_STEP_BUDGET`, `PROPOSAL_STEP_BUDGET`, `AUTO_APPLY_CONFIDENCE_THRESHOLD`, chunk sizing, and search leg weights are env-tunable (see `.env.example`).
 - **Swapping in the Agents SDK**: implement `ReconciliationEngine` (`src/pipeline/reconciliation/engine.ts`) using the SDK, reuse `createReconciliationTools` definitions as function tools, inject via `buildPipeline`.
 - **Queue**: `JobRunner` is deliberately queue-shaped (claim → advance one step). Replacing it with pg-boss/Graphile Worker touches `src/jobs/runner.ts` only.
 

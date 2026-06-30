@@ -40,7 +40,7 @@ An LLM-powered, wiki-style knowledge management system. Raw notes go through a p
 
 ## Testing conventions
 
-- `test/helpers.ts` builds the offline stack (`buildTestStack`) and scripted turns. **`MockChatProvider` is strict FIFO** — push turns in the exact order the pipeline calls the model: classify → reconcile turns → proposal → eligibility (eligibility is consulted *after* the proposal turn, per `create_document` candidate, only when the deterministic gate passes and `use_llm_judgment` is true).
+- `test/helpers.ts` builds the offline stack (`buildTestStack`) and scripted turns. **`MockChatProvider` is strict FIFO** — push turns in the exact order the pipeline calls the model: classify → reconcile turns → proposal tool calls (`proposalTurn` emits `propose_*` + `done`) → eligibility (only when `create_document` passes the deterministic gate and `use_llm_judgment` is true).
 - Integration tests assert on transcripts (e.g. tool results reaching the model) via `kind: "fn"` turns.
 - New behavior needs a test; new end-to-end behavioral contracts belong in `scripts/eval.ts` too.
 - JSON log lines in test output are expected noise.
@@ -49,8 +49,10 @@ An LLM-powered, wiki-style knowledge management system. Raw notes go through a p
 
 | You want to… | Touch |
 |---|---|
-| New action type | `src/domain/schemas.ts` (ActionType), `src/actions/index.ts` (payload schema + validate + idempotent apply + registry), prompt list in `src/pipeline/stages/propose.ts`, tests in `test/actions.test.ts` |
+| New action type | `src/domain/schemas.ts` (ActionType), `src/actions/index.ts` (payload schema + validate + idempotent apply + registry), `src/pipeline/stages/propose-tools.ts` (proposal tool), tests in `test/actions.test.ts` |
+| New proposal tool | `src/pipeline/stages/propose-tools.ts` |
 | New reconciliation tool | `src/pipeline/reconciliation/tools.ts` (Zod-parameterized definition + deterministic execute) |
+| New MCP read tool | `src/mcp/server.ts` |
 | Swap in OpenAI Agents SDK | Implement `ReconciliationEngine` (`src/pipeline/reconciliation/engine.ts`), inject via `buildPipeline({ reconciliationEngine })`. ADR-0001. |
 | New repository method | `src/repositories/interfaces.ts` first, then BOTH `memory/` and `supabase/` implementations |
 | New API endpoint | `src/api/app.ts` via `createRoute` with Zod schemas (OpenAPI is generated — never hand-edit a spec) |
@@ -71,3 +73,12 @@ An LLM-powered, wiki-style knowledge management system. Raw notes go through a p
 - Don't commit `.env`, generated files (`supabase/generated/`), or `node_modules`.
 - Don't weaken lint rules or delete failing tests to get green; fix the code or discuss in the PR.
 - Keep diffs scoped; run the full gate before declaring done.
+
+## Cursor Cloud
+
+- Agent bundle lives in committed `.cursor/` (implement-plan, code-review, subagents, plan-sync hook).
+- Shared opinions: committed `.agents/OPINIONS.md` — do **not** rely on a `~/.agents` symlink in cloud VMs.
+- Restore external skills after clone: `npx skills experimental_install` (reads `skills-lock.json`).
+- **LLM provider:** LM Studio via `src/providers/lmstudio.ts` (openai-compatible local server). Tests use mocks — no API keys for the gate.
+- **MCP:** read-only external access at `POST /mcp` (`src/mcp/server.ts`). Writes go through HTTP (`/ingestions`, `/review-items/*`) with human review.
+- MCP is intentionally unauthenticated for now; add bearer auth before public deploy.
