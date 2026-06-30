@@ -9,6 +9,7 @@ import {
   ReviewItemSchema,
 } from "../domain/schemas.js";
 import type { JobRunner } from "../jobs/runner.js";
+import { handleMcpRequest } from "../mcp/server.js";
 import type { Pipeline } from "../pipeline/index.js";
 import type { Repositories } from "../repositories/interfaces.js";
 
@@ -418,6 +419,9 @@ export function createApp(deps: ApiDeps) {
       );
     },
   );
+
+  // ---------- MCP (read-only external access) ----------
+  app.post("/mcp", async (c) => handleMcpRequest({ repos, search: pipeline.search }, c.req.raw));
 
   // ---------- runner control (dev convenience) ----------
   app.openapi(

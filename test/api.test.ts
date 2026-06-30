@@ -146,6 +146,55 @@ describe("HTTP API (plan §11)", () => {
     expect(((await bad.json()) as { error: string }).error).toMatch(/validation failed/);
   });
 
+  it("MCP endpoint accepts initialize and lists read tools", async () => {
+    const { app } = buildApi();
+    const init = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "kms-test", version: "0.1.0" },
+        },
+      }),
+    });
+    expect(init.status).toBe(200);
+    const initBody = (await init.json()) as { result?: { serverInfo?: { name: string } } };
+    expect(initBody.result?.serverInfo?.name).toBe("kms");
+
+    const tools = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+        params: {},
+      }),
+    });
+    expect(tools.status).toBe(200);
+    const listed = (await tools.json()) as { result?: { tools?: Array<{ name: string }> } };
+    const names = (listed.result?.tools ?? []).map((t) => t.name).sort();
+    expect(names).toEqual([
+      "get_document",
+      "get_document_versions",
+      "list_documents",
+      "list_review_items",
+      "list_tags",
+      "search_kb",
+    ]);
+  });
+
   it("review endpoints drive the park/resume loop over HTTP", async () => {
     const { stack, app } = buildApi();
     const createRes = await app.request("/knowledge-bases", {
