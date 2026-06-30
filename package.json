@@ -1,0 +1,35 @@
+{
+  "name": "kms",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/api/server.ts",
+    "start": "tsx src/api/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check src test",
+    "lint:fix": "biome check --write src test",
+    "eval": "tsx scripts/eval.ts",
+    "seed": "tsx scripts/seed.ts",
+    "db:vector-index": "tsx scripts/generate-vector-index.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.4",
+    "@hono/zod-openapi": "^1.4.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@supabase/supabase-js": "^2.108.1",
+    "hono": "^4.12.25",
+    "openai": "^6.42.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

@@ -1,292 +1,139 @@
-# ai-wiki
+# KMS — LLM-powered wiki-style knowledge management system
 
-A content-agnostic, AI-agent-friendly wiki with provider-agnostic LLM,
-a Postgres-backed job queue, and a focused-step agent that distills raw
-content (transcripts, notes, summaries) into structured wiki documents.
+Drop raw notes in; get a maintained, interlinked, versioned wiki out. An LLM ingestion pipeline classifies incoming text, reconciles it against what the knowledge base already says (using tools, not vibes), and proposes structured edits that deterministic code validates and applies — with human review gates, full audit/rollback, and hybrid (semantic + keyword) retrieval.
+
+Built per the agreed build plan; the locked decisions below are implemented as specified and not re-litigated in code comments.
+
+## The pipeline at a glance
 
 ```
-                                              ┌──────────────────┐
-                                              │  LLM provider    │
-  ┌──────────────┐    ┌──────────────────┐    │  (Anthropic /    │
-  │  Hono HTTP   │    │  Worker process  │ ── │   OpenAI /       │
-  │              │    │                  │    │   Ollama / etc.) │
-  │ POST /mcp    │    │  poll → handler  │    └──────────────────┘
-  │ POST /tasks/ │    │  → agent → tools │
-  │ GET  /health │    │                  │    ┌──────────────────┐
-  └──────┬───────┘    └────────┬─────────┘    │  Embedding       │
-         │                     │              │  provider        │
-         │ enqueue             │              │  (one, pinned)   │
-         ▼                     │              └──────────────────┘
-  ┌──────────────────────────────────────────────────────────┐
-  │  Postgres (Supabase): documents, chunks, relations,       │
-  │  jobs, agent_runs + pgvector + full-text search           │
-  └──────────────────────────────────────────────────────────┘
-         ▲
-         │ cron enqueues maintenance jobs
-  ┌──────┴──────┐
-  │  Scheduler  │
-  └─────────────┘
+received → classifying → classified → reconciling → reconciled
+        ↘ completed (exact duplicate)            ↓
+                              ┌────────── awaiting_review ──────────┐
+                              ↓                                      ↓
+                       proposing_edits ───────────────────→ applying_edits → completed
+                              ↘ awaiting_review (gated proposals) ↗        ↘ failed
 ```
 
-## What's in the box
+- **Stage 1 — classify** (`src/pipeline/stages/classify.ts`): atomic statements bucketed `clear` / `semi_clear` / `unusable`, each with provenance offsets into the source. Exact-duplicate imports (content hash) short-circuit to `completed` with `duplicate_of_job_id`; normalized-hash near matches are flagged and continue.
+- **Stage 2 — reconcile** (`src/pipeline/reconciliation/`): a thin tool-call loop drives four deterministic tools — `searchKnowledge` (hybrid search), `getDocument`, `findSimilarDocuments`, `checkName` (edit-distance fuzzy titles, so "Thornwik" resolves to "Thornwick" instead of becoming a new entity). Output: a report marking every statement `confirmed` / `conflicts` / `new` / `needs_review`, plus scratchpad additions. A config-driven step budget bounds the loop; on exhaustion, unaddressed statements fail safe into `needs_review`.
+- **Review gate** (`src/review/`): conflicts and ambiguities become `review_item` rows; the job parks in `awaiting_review`. Humans answer over the API (`context` / `skip` / `approve` / `reject`); answers land in the job scratchpad and the pipeline resumes automatically when nothing pending remains.
+- **Stage 3 — propose & apply** (`src/pipeline/stages/propose.ts` + `src/actions/`): the LLM proposes typed actions (`create_document`, `append_section`, `update_section`, `upsert_link`, `create_tag`, `apply_tag`, `promote_subsection`); deterministic code validates them (template guardrails, link integrity, tag policy, near-duplicate title check) and applies them through the versioning service. Confidence ≥ `AUTO_APPLY_CONFIDENCE_THRESHOLD` auto-applies; everything else parks for approval. **Augment-first**: page eligibility is a deterministic gate (+ optionally a gated LLM judgment); failed gates demote `create_document` into an `append_section` on the proposal's `fallback_attach` target — same input, different KB config, different wiki shape.
 
-**Storage** — Supabase Postgres + pgvector. Five tables:
-- `documents` — wiki pages with `metadata jsonb` (content-agnostic)
-- `chunks` — embedded slices, hashed for change-detection
-- `relations` — typed edges between documents (agent-generated)
-- `jobs` — Postgres-backed work queue with SKIP LOCKED semantics
-- `agent_runs` — audit log of every agent invocation with token usage
+## Locked architecture decisions (implemented)
 
-**Server** — Hono, runs anywhere Node runs (Fly, Lambda + Web Adapter, local).
-- `POST /mcp` — MCP over HTTP (read-only tools)
-- `POST /tasks/distill` — submit content for agent processing
-- `POST /tasks/enqueue` — generic job enqueue
+1. **Hybrid orchestration** — self-owned persisted state machine (`src/pipeline/stateMachine.ts`); Stage 2 behind the `ReconciliationEngine` interface with a thin tool-call loop default. The OpenAI Agents SDK can be dropped in later: implement `ReconciliationEngine`, pass it to `buildPipeline({ reconciliationEngine })` — the tool definitions are already Zod-parameterized function-tool shapes. Nothing else moves.
+2. **Local embeddings via provider abstraction** — LM Studio behind `EmbeddingProvider`; every chunk records `embedding_model` + `dimension`; the dimension is config-driven (`EMBEDDING_DIMENSION`), never hardcoded in the schema (the migration declares `vector` without a dimension; the index DDL is generated — see runbook).
+3. **Multi-tenant** — `knowledge_base_id` on every domain table; all queries scoped.
+4. **Repository-isolated data layer** — business logic depends on `src/repositories/interfaces.ts` only. `@supabase/supabase-js` is imported in exactly one file (`src/db/client.ts`); the architecture test enforces this mechanically. pgvector is a hard dependency.
+5. **Versioning + audit + rollback** — every document mutation goes through `VersioningService`: immutable `document_version` rows, audit log entries, chunk regeneration; `rollback` restores any version as a new current version.
+6. **Scratchpad** — structured jsonb on the ingestion job (`relevant_summaries`, `entity_resolutions`, `name_decisions`, `notes`, `review_context`) with a markdown rendering for prompts and review UI.
+7. **Review via DB rows + API** — no bespoke queue; `review_item` rows + Hono endpoints.
+8. **Per-KB versioned config** — page-eligibility rules, templates, tag policy; config updates bump `config_version` and are audited; versions record which config they were written under. `promote_subsection` is the first-class showcase action: new page + link stub in the source + reciprocal links, all reviewable.
+9. **Content-hash dedup** on import; normalized near matches flagged (full diff/merge semantics deferred).
+10. **Stack** — TypeScript strict ESM, pnpm, Hono + `@hono/zod-openapi` (OpenAPI generated from the Zod schemas at `/openapi.json`), Vitest, Supabase CLI migrations, Zod v4 as the single source of truth for domain shapes.
 
-**Worker** — long-running process that polls the jobs table and dispatches.
-- Atomic claim via `claim_next_job()` RPC
-- Exponential backoff retry, max_attempts honored
-- Handlers registered in `src/jobs/handlers.ts`
+## Documentation
 
-**Scheduler** — node-cron process that enqueues jobs on a schedule.
-- 15-minute: re-embed any stale (NULL-embedding) chunks
-- 03:00 UTC: nightly housekeeping hook
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — technical map: control flow, module guide, data model, testing architecture
+- [docs/adr/](docs/adr/) — Architecture Decision Records for every locked decision (binding; supersede, don't diverge)
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — workflow, definition of done, recipes for common changes
+- [AGENTS.md](AGENTS.md) — canonical instructions for AI coding agents (Claude Code / Cursor / Codex / Copilot read this; `CLAUDE.md` and `.github/copilot-instructions.md` are pointers)
 
-**Agents** — composed of focused single-purpose LLM calls.
-- `classify` — propose title, summary line, tags, doc type
-- `extract_entities` — typed entities (person, project, decision, etc.)
-- `reconcile` — match each entity to existing docs (retrieval → LLM judge)
-- `distill` — orchestrates the above, writes the doc, links relations
+## Repository map
 
-**Tools** — `src/tools/` — plain functions wrapped as AI SDK tools.
-- Read: `search_kb`, `get_document`, `list_tags`, `list_documents`, `relations_for`
-- Write: `create_document`, `update_document`, `link_documents`
+```
+src/
+  config/            env-driven config (Zod-validated, dev-safe defaults)
+  domain/            Zod schemas (single source of truth), hashing, slugs
+  db/client.ts       the ONLY file importing @supabase/supabase-js
+  repositories/      interfaces + in-memory impl (tests) + Supabase impl (prod)
+  providers/         ChatProvider/EmbeddingProvider; LM Studio impl; mocks
+  retrieval/         chunker + hybrid search (pgvector semantic + FTS keyword + RRF)
+  templates/         section templates, guardrail validation, markdown rendering
+  versioning/        immutable versions, audit, rollback, chunk regeneration
+  kb/                KB creation, versioned config updates, page-eligibility engine
+  actions/           the 7 action types: payload schemas, validation, idempotent apply
+  pipeline/          state machine, scratchpad, stages, reconciliation engine
+  review/            review workflow + automatic job resume
+  jobs/runner.ts     in-process scheduler with a queue-shaped boundary
+  api/               Hono app factory (createApp) + production server entrypoint
+supabase/migrations/ schema (vector column WITHOUT fixed dimension; FTS; RPCs)
+scripts/             generate-vector-index, seed, eval (golden scenarios)
+test/                Vitest suite incl. architecture guards
+```
 
-## Setup
+## Runbook
 
-1. Create a Supabase project (free tier is fine). Open SQL editor → run `sql/schema.sql`.
-2. `cp .env.example .env` and fill in.
-3. `npm install`
-4. `npm run ingest` — loads sample docs.
-5. In three terminals:
-   ```bash
-   npm run dev:server     # Hono on :3000
-   npm run dev:worker     # job runner
-   npm run dev:scheduler  # cron enqueuer
-   ```
+### Prerequisites
+- Node ≥ 22, pnpm ≥ 9
+- Docker (for `supabase start`, and optionally for running the API container)
+- Supabase CLI
+- LM Studio with a chat model and an embedding model loaded, local server enabled
 
-## Provider-agnostic LLM
-
-Pick one in `.env`:
-
+### 1. Install & verify
 ```bash
-# Anthropic
-LLM_PROVIDER=anthropic
-LLM_MODEL=claude-sonnet-4-5-20250929
-ANTHROPIC_API_KEY=sk-ant-...
-
-# OpenAI
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4o-mini
-OPENAI_API_KEY=sk-...
-
-# Anything OpenAI-compatible (Ollama, vLLM, LM Studio, OpenRouter, Together, Groq)
-LLM_PROVIDER=openai-compatible
-LLM_MODEL=llama3.1:8b
-LLM_BASE_URL=http://localhost:11434/v1
-LLM_API_KEY=ollama
+pnpm install
+pnpm typecheck && pnpm test && pnpm eval   # all offline; no DB or LLM needed
 ```
 
-The rest of the code never touches a provider SDK — it imports `model()` from
-`src/llm/index.ts`. Same agent, same prompts, same tool definitions across
-providers.
-
-**Caveat on local models:** the agents use Zod-schema structured outputs and
-tool calling. Frontier models nail both; smaller local models (≤13B) are weaker.
-The architecture mitigates this by keeping each LLM call small and
-single-purpose — each step asks for one Zod object, not a multi-step agentic
-plan. A 7B model can hit that reliably even if it would fall over on a
-monolithic prompt.
-
-## Embeddings: pinned, not swappable
-
-Each provider produces vectors in its own space and dimension. You can't mix
-them in one pgvector column. So you pick one embedding model at project start
-and commit:
-
-| Model | Dim | Provider |
-|---|---|---|
-| `text-embedding-3-small` (default) | 1536 | OpenAI |
-| `text-embedding-3-large` | 3072 | OpenAI |
-| `nomic-embed-text` | 768 | Ollama |
-| `mxbai-embed-large` | 1024 | Ollama |
-
-To switch later: change `EMBEDDING_DIM` in `.env`, change `vector(N)` in
-`sql/schema.sql` (two places), recreate the schema, re-ingest everything.
-
-## Submitting work to the agent
-
-Three ways, same result:
-
+### 2. Database
 ```bash
-# 1. CLI, runs inline (no queue) — great for iterating on prompts
-npm run distill -- content/examples/meeting-q3-solar-pricing.txt transcript
-
-# 2. REST, enqueues
-curl -X POST http://localhost:3000/tasks/distill \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -n --rawfile content content/examples/meeting-q3-solar-pricing.txt \
-         '{content: $content, source_type: "transcript"}')"
-
-# 3. From your own code
-import { enqueue } from "./jobs/enqueue.js";
-await enqueue({
-  kind: "distill",
-  payload: { content, source_type: "notes", metadata: { date: "..." } },
-  idempotencyKey: `mtg-${meetingId}`,
-});
+supabase start                 # local stack (Postgres + PostgREST + Studio)
+supabase db push               # apply migrations (pgvector, schema, FTS, RPCs)
+pnpm db:vector-index           # generate index DDL from EMBEDDING_DIMENSION
+psql "$DATABASE_URL" -f supabase/generated/vector_index.sql
 ```
+The migration intentionally leaves `chunk.embedding` as dimension-less `vector`; the generated DDL pins the column type and builds the HNSW index for the configured dimension (locked decision #2).
 
-The worker picks it up, runs the agent, creates docs and relations, and
-writes an `agent_runs` row with token usage.
+> This repo was authored in an environment without a Docker daemon, so `supabase db push` and the live Supabase repositories were written to spec but not executed against a running stack here. The unit/integration suite covers the same repository contracts via the in-memory implementation; run the commands above for live verification.
 
-## What the distill agent actually does
+### 3. Configuration
+Copy `.env.example` → `.env` and fill in:
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — printed by `supabase status`
+- `LMSTUDIO_BASE_URL` (default `http://127.0.0.1:1234/v1`), `LMSTUDIO_CHAT_MODEL`, `LMSTUDIO_EMBEDDING_MODEL`
+- `EMBEDDING_DIMENSION` — must match the embedding model (e.g. 768 for nomic-embed-text v1.5); the provider fails loudly on mismatch
 
-For the sample meeting transcript:
-
-1. **Classify** (one LLM call, JSON schema)
-   → title="Q3 Solar Pricing Review", doc_type="meeting-notes",
-     tags=["pricing", "solar", "california"]
-2. **Extract entities** (one LLM call, JSON schema)
-   → [Sara (person), Marcus (person), Priya (person), Tom (person),
-      NEM 3.0 (topic), Q3 Pricing Review (project), bundled-default decision (decision), ...]
-3. **Reconcile each entity** (1 embedding search + 1 LLM call each)
-   → "NEM 3.0" matches existing `solar-ca-nem3`. New people get stub docs.
-4. **Generate the doc body** (one LLM call, free-form markdown)
-   → Sections for context, decisions, action items, with inline links to
-     matched docs.
-5. **Apply deterministically** — `upsertDocument`, `linkDocuments` for each
-   reconciled entity. Stubs for new entities. Audit row in `agent_runs`.
-
-Total: ~7 small LLM calls, each with a tight schema. Compare to a single
-"do everything" prompt: less reliable, harder to debug, harder to swap models.
-
-## Token-conscious patterns used in the code
-
-The user said "as much deterministic as possible, token-conscious." Concrete
-applications throughout the code:
-
-- **Hash-based chunk dedupe** — `rebuildChunks` hashes each chunk; embedding
-  calls happen only for changed chunks. Edit workflows save the majority of
-  embedding spend.
-- **Retrieval before LLM judgment** — `reconcile` does an embedding search
-  first, then passes only the top 5 candidates to the LLM. Constant-size
-  prompt regardless of KB size.
-- **Structured outputs everywhere** — `generateObject` with Zod schemas means
-  shorter completions and no prose parsing.
-- **Short-circuit when results are empty** — `reconcile` skips the LLM
-  entirely if there are zero candidates; the answer is deterministically
-  "create_new".
-- **Many small calls vs. one big agent loop** — easier to use cheap models
-  for triage steps and expensive ones for synthesis. Easier to cache. Easier
-  to debug.
-- **Token usage recorded per run** — `agent_runs.tokens_in / tokens_out`
-  per agent invocation. Query this table to find hot spots.
-
-## Deployment
-
-### Fly.io
-
-Hono + node-server runs unchanged in a container. The server, worker, and
-scheduler are three Node processes — deploy as either:
-- Three Fly Machines (cleanest separation), or
-- One container running all three via a process manager (simpler, fine at small scale)
-
-Minimal Dockerfile:
-
-```dockerfile
-FROM node:22-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
-COPY . .
-RUN npm run build
-CMD ["node", "dist/server.js"]
+### 4. Run
+```bash
+pnpm dev        # watch mode
+# or
+pnpm start      # tsx src/api/server.ts
+pnpm seed       # optional: demo "Campaign Notes" KB through the full pipeline
 ```
+API docs: `GET /openapi.json` (generated), human entry at `/docs`. Key endpoints: `POST /knowledge-bases`, `POST /knowledge-bases/:id/ingestions` (`run:false` to let the background runner advance it), `GET /knowledge-bases/:id/review-items`, `POST /review-items/:id/{context|skip|approve|reject}`, `GET /knowledge-bases/:id/search?q=…`, `GET /documents/:id/versions`, `POST /documents/:id/rollback`.
 
-### AWS Lambda
-
-The Hono `app` exports cleanly:
-
-```ts
-// src/lambda.ts
-import { handle } from "hono/aws-lambda";
-import { app } from "./server.js";
-export const handler = handle(app);
+### 5. Docker (local dev, optional)
+The database stack stays with `supabase start` (it already runs its own containers) and LM Studio stays on the host; the compose file runs just the KMS API and reaches both via `host.docker.internal`:
+```bash
+supabase start
+export SUPABASE_SERVICE_ROLE_KEY=...   # from `supabase status`
+docker compose up --build
 ```
+`Dockerfile` is a multi-stage Node 22 build running the API via tsx; on Linux the compose file maps `host.docker.internal` to the host gateway (Docker Desktop provides it natively). Written to spec in a daemon-less environment — expect to smoke-test the first build.
 
-Two caveats:
-- The `/mcp` route uses `c.env.incoming`/`c.env.outgoing` from `@hono/node-server`.
-  On Lambda use the **Lambda Web Adapter** extension to keep that code path
-  unchanged — it gives the function a Node HTTP server inside.
-- The worker is a long-running poll loop, not Lambda-shaped. Either:
-  - Keep the worker on Fly / ECS / a small VM, or
-  - Replace polling with **EventBridge Pipes** from a Postgres stream, or
-  - Skip the queue table and trigger handler Lambdas directly from API Gateway
-    (loses retry/audit nicety).
+## MCP (read-only external access)
 
-### Auth before you deploy
+`POST /mcp` exposes a [Model Context Protocol](https://modelcontextprotocol.io/) Streamable HTTP endpoint for external AI clients (Cursor IDE, Claude Code, etc.).
 
-The `/mcp` and `/tasks/*` endpoints are unauthenticated. Add bearer auth
-before exposing publicly:
+**Read tools:** `search_kb`, `get_document`, `list_documents`, `list_tags`, `get_document_versions`, `list_review_items`.
 
-```ts
-import { bearerAuth } from "hono/bearer-auth";
-app.use("/mcp", bearerAuth({ token: process.env.MCP_TOKEN! }));
-app.use("/tasks/*", bearerAuth({ token: process.env.TASK_TOKEN! }));
-```
+**Writes are intentionally not on MCP.** Ingest content via `POST /knowledge-bases/:id/ingestions`; resolve review via `POST /review-items/:id/{context|skip|approve|reject}`.
 
-## Scaling notes
+LM Studio remains the pipeline LLM provider (`src/providers/lmstudio.ts`). MCP is a query surface only.
 
-| Stage | What changes |
-|---|---|
-| Prototype (≤ 10k chunks) | Supabase free, single Node process for everything. |
-| Small prod (≤ 100k chunks) | Supabase Pro. Server / worker / scheduler in separate Fly Machines. |
-| Medium (≤ 1M chunks) | Tune HNSW; multiple workers (skip-locked already supports this); cache hot search queries. |
-| Large | Move embeddings to Turbopuffer / Pinecone; documents stay in Postgres. The MCP and agent code don't change. |
+> MCP is unauthenticated in this release. Add bearer auth before exposing publicly.
 
-## Layout
+## Testing & evals
+- `pnpm test` — 53 tests: unit (config, chunker, RRF, hashing, templates), contract (repositories, structured-output retry/bounded-failure), pipeline integration (dedup short-circuit, planted-conflict reconciliation with scripted tool transcripts, park/resume review flows, page-eligibility flip, proposal tool-call loop), API smoke over `app.request` (including MCP initialize), and architecture guards (client-import isolation enforced by reading the source tree).
+- `pnpm eval` — golden end-to-end scenarios with deterministic pass/fail and nonzero exit for CI gating. Same harness can be pointed at live providers later for model-regression checks.
+- Mock model turns are strict FIFO; tests assert on the transcript (e.g. that `checkName` results actually reached the model before it resolved a misspelling).
 
-```
-ai-wiki/
-├── sql/schema.sql
-├── src/
-│   ├── server.ts                  # Hono entrypoint
-│   ├── worker.ts                  # worker entrypoint
-│   ├── scheduler.ts               # cron entrypoint
-│   ├── ingest.ts                  # markdown → docs
-│   ├── query.ts                   # CLI search
-│   ├── content-hash.ts            # sha256, slugify, normalize
-│   ├── db.ts                      # Supabase client
-│   ├── llm/index.ts               # provider-agnostic LLM facade
-│   ├── embeddings/index.ts        # embedding facade
-│   ├── tools/
-│   │   ├── index.ts               # AI SDK tool wrappers
-│   │   ├── search.ts              # searchKb, listTags, listDocuments
-│   │   ├── documents.ts           # CRUD + chunking + hash-dedupe
-│   │   └── relations.ts           # typed edges
-│   ├── agents/
-│   │   ├── classify.ts            # focused LLM call
-│   │   ├── extract-entities.ts    # focused LLM call
-│   │   ├── reconcile.ts           # retrieval + LLM
-│   │   └── distill.ts             # orchestrator
-│   ├── jobs/
-│   │   ├── enqueue.ts             # insert into jobs table
-│   │   ├── runner.ts              # poll loop
-│   │   └── handlers.ts            # registered handlers
-│   └── cli/distill.ts             # run distill inline, no queue
-└── content/
-    ├── solar-itc-federal.md       # sample wiki docs
-    ├── solar-ca-nem3.md
-    └── examples/
-        └── meeting-q3-solar-pricing.txt   # sample input for distill
-```
+## Operating notes
+- **Changing embedding models**: update `LMSTUDIO_EMBEDDING_MODEL` + `EMBEDDING_DIMENSION`, re-run `pnpm db:vector-index` + apply, then regenerate chunks (re-save current versions through `VersioningService` or write a backfill that calls `SearchService.regenerateChunks`). Chunks self-describe their model/dimension, so stale rows are detectable.
+- **Step budget / thresholds**: `RECONCILIATION_STEP_BUDGET`, `PROPOSAL_STEP_BUDGET`, `AUTO_APPLY_CONFIDENCE_THRESHOLD`, chunk sizing, and search leg weights are env-tunable (see `.env.example`).
+- **Swapping in the Agents SDK**: implement `ReconciliationEngine` (`src/pipeline/reconciliation/engine.ts`) using the SDK, reuse `createReconciliationTools` definitions as function tools, inject via `buildPipeline`.
+- **Queue**: `JobRunner` is deliberately queue-shaped (claim → advance one step). Replacing it with pg-boss/Graphile Worker touches `src/jobs/runner.ts` only.
+
+## Deferred (per plan §13)
+Auth/multi-user permissions on the API; a real job queue; rich diff/merge for near-duplicate re-imports (currently flag-and-continue); pgvector index tuning beyond the generated HNSW defaults; live-model eval harness wiring; UI.

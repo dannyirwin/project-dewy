@@ -1,0 +1,1 @@
+All agent instructions live in [AGENTS.md](../AGENTS.md) (canonical, tool-agnostic). Read it before making changes. Architecture decisions are recorded in `docs/adr/` and are binding. Definition of done: `pnpm typecheck && pnpm lint && pnpm test && pnpm eval` — the suite runs fully offline.

@@ -1,6 +1,17 @@
+node_modules/
+dist/
 .env
 .env.*
 !.env.example
-node_modules/
-dist/
+*.log
+supabase/.temp/
+supabase/generated/
 .DS_Store
+
+# Installed by `npx skills experimental_install` from skills-lock.json
+.agents/skills/
+.agents/.skill-lock.json
+.cursor/skills/*
+!.cursor/skills/implement-plan/
+!.cursor/skills/code-review/
+.claude/skills/

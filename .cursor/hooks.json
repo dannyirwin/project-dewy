@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterFileEdit": [
+      {
+        "command": ".cursor/hooks/sync-plan-to-workspace.sh",
+        "matcher": "Write"
+      }
+    ]
+  }
+}
