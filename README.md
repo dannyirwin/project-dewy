@@ -69,7 +69,16 @@ test/                Vitest suite incl. architecture guards
 - Node ≥ 22, pnpm ≥ 9
 - Docker (for `supabase start`, and optionally for running the API container)
 - Supabase CLI
-- LM Studio with a chat model and an embedding model loaded, local server enabled
+- LM Studio with a **chat** model and an **embedding** model loaded, local server enabled
+
+See [docs/LIVE-STACK.md](docs/LIVE-STACK.md) for the full checklist and [docs/CURSOR-MCP.md](docs/CURSOR-MCP.md) for Cursor integration.
+
+Default models (override in `.env`):
+
+| Role | Default | Dimension |
+|------|---------|-----------|
+| Chat | `qwen2.5-14b-instruct` | n/a |
+| Embeddings | `text-embedding-nomic-embed-text-v1.5` | 768 (`EMBEDDING_DIMENSION`) |
 
 ### 1. Install & verify
 ```bash
@@ -122,7 +131,10 @@ docker compose up --build
 
 LM Studio remains the pipeline LLM provider (`src/providers/lmstudio.ts`). MCP is a query surface only.
 
-> MCP is unauthenticated in this release. Add bearer auth before exposing publicly.
+Set `MCP_TOKEN` in `.env` before connecting from Cursor (see [docs/CURSOR-MCP.md](docs/CURSOR-MCP.md)).
+Mutating HTTP routes accept `API_TOKEN` when set; GET routes stay public.
+
+> Leave tokens empty for local dev and offline tests. Set both before shared-network or remote deploy.
 
 ## Testing & evals
 - `pnpm test` — 53 tests: unit (config, chunker, RRF, hashing, templates), contract (repositories, structured-output retry/bounded-failure), pipeline integration (dedup short-circuit, planted-conflict reconciliation with scripted tool transcripts, park/resume review flows, page-eligibility flip, proposal tool-call loop), API smoke over `app.request` (including MCP initialize), and architecture guards (client-import isolation enforced by reading the source tree).
