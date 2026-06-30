@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
+import "../src/load-env.js";
 import { loadConfig } from "../src/config/index.js";
 
 /**

@@ -30,6 +30,11 @@ const envSchema = z.object({
   CHUNK_OVERLAP_TOKENS: z.coerce.number().int().min(0).default(60),
   SEARCH_SEMANTIC_WEIGHT: z.coerce.number().min(0).default(1.0),
   SEARCH_KEYWORD_WEIGHT: z.coerce.number().min(0).default(1.0),
+
+  /** When non-empty, POST /mcp requires Authorization: Bearer <token>. */
+  MCP_TOKEN: z.string().default(""),
+  /** When non-empty, mutating HTTP routes require Authorization: Bearer <token>. GET stays public. */
+  API_TOKEN: z.string().default(""),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

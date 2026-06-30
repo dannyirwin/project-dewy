@@ -1,3 +1,4 @@
+import "../load-env.js";
 import { serve } from "@hono/node-server";
 import { config } from "../config/index.js";
 import { getSupabaseClient } from "../db/client.js";
@@ -19,7 +20,12 @@ const embeddings = new LmStudioEmbeddingProvider(cfg);
 const pipeline = buildPipeline({ repos, chat, embeddings, cfg });
 const runner = new JobRunner(repos, pipeline, 2000);
 
-const app = createApp({ repos, pipeline, runner });
+const app = createApp({
+  repos,
+  pipeline,
+  runner,
+  auth: { mcpToken: cfg.MCP_TOKEN, apiToken: cfg.API_TOKEN },
+});
 
 runner.start();
 serve({ fetch: app.fetch, port: cfg.PORT }, (info) => {
