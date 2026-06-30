@@ -5,39 +5,32 @@ description: Non-interactive code review of current diff against repo convention
 
 # Code Review
 
-Read the diff and produce a structured review. No browser, no external tools — the agent performs the review autonomously.
+Read the diff and produce a structured review.
+No browser, no external tools - the agent performs the review autonomously.
 
 ## Steps
 
-1. Run `git diff develop...HEAD` to get the full diff against the local `develop` branch
-2. Read each changed file in full for context where the diff alone is insufficient
-3. Review against the checklist below
-4. Output a structured findings report
+1. Determine the integration branch from `AGENTS.md ## Project` or default to `main`
+2. Run `git diff <integration-branch>...HEAD` to get the full diff
+3. Read each changed file in full for context where the diff alone is insufficient
+4. Review against the checklist below plus any project rules in `AGENTS.md` and `.cursor/rules/`
+5. Output a structured findings report
 
 ## Review checklist
 
-**Backend**
-- [ ] No Prisma queries directly in route handlers — all DB access via a service function
-- [ ] Multi-step DB operations wrapped in `prisma.$transaction()`
-- [ ] All wallet mutations go through `walletLedgerService.applyWalletDelta()` — no direct balance writes
-- [ ] Game balance values read from `packages/backend/src/config/gameplay.ts` — no hardcoded numbers
-- [ ] Operational errors thrown as `AppError`; structured logging via `logger` (Pino)
-- [ ] No `any` types; strict TypeScript throughout
-- [ ] New endpoints have Zod validation on request body/params
-- [ ] No PII (emails, raw coordinates, IP addresses) in log statements
-
-**Frontend**
-- [ ] Theme tokens via `useTheme()` — no inline hex colours, hardcoded radii or spacing
-- [ ] Buttons built from `components/conqr-cx/*` primitives — no ad-hoc `TouchableOpacity`/`Pressable` in guarded dirs
-- [ ] No `console.log` in production paths — gated behind `isDevBuild` + `EXPO_PUBLIC_DEBUG_*`
-- [ ] No auth tokens stored in `AsyncStorage` — SecureStore only
-- [ ] `pnpm` used, not `npm`/`npx`
-
-**General**
-- [ ] No new barrel `index.ts` files
+**General (all projects)**
+- [ ] No `any` types where the project uses TypeScript strictly
+- [ ] No new barrel `index.ts` files unless the project convention allows them
 - [ ] No commented-out code left behind
-- [ ] TODO comments that were completed are removed
-- [ ] Docs updated if behaviour changed (relevant files in `docs/`)
+- [ ] Completed TODO comments are removed
+- [ ] Docs updated if behaviour changed
+
+**Project-specific**
+- [ ] Conventions in `AGENTS.md ## Project` are followed
+- [ ] Cursor rules under `.cursor/rules/` are honoured when applicable
+
+Add domain-specific checklist items in the target repo's `AGENTS.md ## Project`
+section after `apply-project.sh`.
 
 ## Output format
 
@@ -56,6 +49,6 @@ Read the diff and produce a structured review. No browser, no external tools —
 ```
 
 Severity levels:
-- **error** — violates a hard convention; must be fixed before merge
-- **warning** — likely problem; should be fixed
-- **suggestion** — style or improvement; optional
+- **error** - violates a hard convention; must be fixed before merge
+- **warning** - likely problem; should be fixed
+- **suggestion** - style or improvement; optional

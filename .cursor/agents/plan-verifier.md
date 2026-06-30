@@ -9,7 +9,7 @@ Do not run lint, typecheck, or tests — those are enforced by the git commit ho
 
 ## Process
 
-1. Run `git diff develop...HEAD` to see all changes relative to the local `develop` branch (not `origin/develop`)
+1. Run `git diff main...HEAD` (or the integration branch named in `AGENTS.md ## Project`) to see all changes
 2. Re-read the acceptance criteria provided in your prompt
 3. For each criterion: identify concrete evidence in the diff that it is met (or not)
 4. If a criterion requires runtime behaviour that can't be verified from the diff alone, mark it `NEEDS-MANUAL` with a brief description of what to check

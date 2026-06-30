@@ -67,3 +67,26 @@ Requires Supabase Postgres with `sql/schema.sql` applied and a filled `.env`
 - Agent bundle: `implement-plan` (skills, subagents, plan-sync hook)
 - Shared opinions: `.agents/OPINIONS.md`
 - Plans live under `.cursor/plans/` when using the implement-plan workflow
+
+### Agent skills
+
+Bundled orchestration skills (committed under `.cursor/skills/`):
+
+- `implement-plan` — parse a plan file, spawn phase implementers, run verifier
+- `code-review` — diff review invoked by `plan-verifier`
+
+Locked external skills (`skills-lock.json`; installed to `.agents/skills/`):
+
+- `gh-axi`, `lavish`, `skill-creator`
+
+After clone, restore external skills:
+
+```bash
+npx skills experimental_install
+```
+
+Re-apply the dotfiles bundle (without skipping skills):
+
+```bash
+bash ~/dotfiles/scripts/apply-project.sh ~/src/project-dewy
+```
